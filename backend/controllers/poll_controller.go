@@ -1,25 +1,55 @@
 package controllers
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
-	"sync"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"live-polling-tool/backend/config"
 	"live-polling-tool/backend/models"
 )
 
-var (
-	polls []models.Poll
-	mu    sync.Mutex
-)
+const pollsKey = "live_polling_polls"
+
+func loadPolls() ([]models.Poll, error) {
+	data, err := config.RedisClient.Get(context.Background(), pollsKey).Result()
+	if err != nil {
+		return []models.Poll{}, nil
+	}
+
+	var polls []models.Poll
+
+	if err := json.Unmarshal([]byte(data), &polls); err != nil {
+		return nil, err
+	}
+
+	return polls, nil
+}
+
+func savePolls(polls []models.Poll) error {
+	data, err := json.Marshal(polls)
+	if err != nil {
+		return err
+	}
+
+	return config.RedisClient.Set(
+		context.Background(),
+		pollsKey,
+		data,
+		0,
+	).Err()
+}
 
 func CreatePoll(c *gin.Context) {
 	var poll models.Poll
 
 	if err := c.ShouldBindJSON(&poll); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request",
+		})
 		return
 	}
 
@@ -31,20 +61,37 @@ func CreatePoll(c *gin.Context) {
 	}
 
 	poll.ID = bson.NewObjectID()
-
-	// Initialize vote count for each option
 	poll.Votes = make([]int, len(poll.Options))
 
-	mu.Lock()
+	polls, err := loadPolls()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to load polls",
+		})
+		return
+	}
+
 	polls = append(polls, poll)
-	mu.Unlock()
+
+	if err := savePolls(polls); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to save poll",
+		})
+		return
+	}
 
 	c.JSON(http.StatusCreated, poll)
 }
 
 func GetPolls(c *gin.Context) {
-	mu.Lock()
-	defer mu.Unlock()
+	polls, err := loadPolls()
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to load polls",
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, polls)
 }
@@ -52,9 +99,9 @@ func GetPolls(c *gin.Context) {
 func VotePoll(c *gin.Context) {
 	pollID := c.Param("id")
 
-	optionIndex := struct {
+	var optionIndex struct {
 		Option int `json:"option"`
-	}{}
+	}
 
 	if err := c.ShouldBindJSON(&optionIndex); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -63,8 +110,14 @@ func VotePoll(c *gin.Context) {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	polls, err := loadPolls()
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to load polls",
+		})
+		return
+	}
 
 	for i := range polls {
 		if polls[i].ID.Hex() == pollID {
@@ -78,6 +131,13 @@ func VotePoll(c *gin.Context) {
 			}
 
 			polls[i].Votes[optionIndex.Option]++
+
+			if err := savePolls(polls); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "Failed to save vote",
+				})
+				return
+			}
 
 			c.JSON(http.StatusOK, polls[i])
 			return
