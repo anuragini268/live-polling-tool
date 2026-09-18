@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import "./index.css";
 
-const API = "http://localhost:8081";
+const API = "https://live-polling-tool-9607.onrender.com";
 
 function App() {
   const [polls, setPolls] = useState([]);
